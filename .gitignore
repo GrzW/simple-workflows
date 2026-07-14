@@ -1,0 +1,27 @@
+# Binaries and build artifacts
+bin/
+engine
+engine-debug
+
+# Local SQLite database and storage
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Configuration and secrets
+.env
+
+# Recruitment metadata & task descriptions
+*report.md
+OLDREADME.md
+workflow-engine-task.md
+
+# IDEs and OS junk
+.idea/
+.vscode/
+.DS_Store
