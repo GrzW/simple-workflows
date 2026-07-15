@@ -1,7 +1,5 @@
 # Binaries and build artifacts
 bin/
-engine
-engine-debug
 
 # Local SQLite database and storage
 data/

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"workflow-engine/internal/models"
+	"workflow-engine/internal/storage"
 )
 
 func newEC(input map[string]any, steps map[int]string) *ExecutionContext {
@@ -363,4 +365,293 @@ func TestEngine_Submit_QueueFull(t *testing.T) {
 	// 129th submit should return ErrQueueFull
 	err := eng.Submit(context.Background(), "overflow-job")
 	assert.ErrorIs(t, err, ErrQueueFull)
+}
+
+func TestEngine_Execution_Success(t *testing.T) {
+	t.Parallel()
+
+	// 1. Setup in-memory store
+	store, err := storage.NewSQLiteStorage(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// 2. Setup engine with the store and concurrency 1
+	eng := NewEngine(store, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eng.Start(ctx)
+	t.Cleanup(func() { eng.Stop() })
+
+	// 3. Seed a workflow
+	wfID := "wf-success-test"
+	wf := &models.Workflow{
+		ID:        wfID,
+		Status:    models.StatusPending,
+		Input:     json.RawMessage(`{"a":10,"b":5}`),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	tasks := []models.Task{
+		{
+			ID:         "task-1",
+			WorkflowID: wfID,
+			Type:       models.TaskTypeCalculate,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"a":"$.input.a","b":"$.input.b","op":"add"}`),
+		},
+		{
+			ID:         "task-2",
+			WorkflowID: wfID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   1,
+			Config:     json.RawMessage(`{"template":"Result is {{$.steps.0}}"}`),
+		},
+	}
+	err = store.CreateWorkflow(ctx, wf, tasks)
+	require.NoError(t, err)
+
+	// 4. Submit workflow
+	err = eng.Submit(ctx, wfID)
+	require.NoError(t, err)
+
+	// 5. Poll database until workflow is completed or timeout
+	var finalWF *models.Workflow
+	var finalTasks []models.Task
+	require.Eventually(t, func() bool {
+		var getErr error
+		finalWF, finalTasks, getErr = store.GetWorkflow(context.Background(), wfID)
+		if getErr != nil {
+			return false
+		}
+		return finalWF.Status == models.StatusCompleted || finalWF.Status == models.StatusFailed
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// 6. Verify assertions
+	assert.Equal(t, models.StatusCompleted, finalWF.Status)
+	require.Len(t, finalTasks, 2)
+	assert.Equal(t, models.StatusCompleted, finalTasks[0].Status)
+	assert.Equal(t, "15", finalTasks[0].Output)
+	assert.Equal(t, models.StatusCompleted, finalTasks[1].Status)
+	assert.Equal(t, "Result is 15", finalTasks[1].Output)
+}
+
+func TestEngine_Execution_Failure(t *testing.T) {
+	t.Parallel()
+
+	// 1. Setup in-memory store
+	store, err := storage.NewSQLiteStorage(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// 2. Setup engine
+	eng := NewEngine(store, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eng.Start(ctx)
+	t.Cleanup(func() { eng.Stop() })
+
+	// 3. Seed workflow with a division by zero error
+	wfID := "wf-failure-test"
+	wf := &models.Workflow{
+		ID:        wfID,
+		Status:    models.StatusPending,
+		Input:     json.RawMessage(`{"x":10}`),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	tasks := []models.Task{
+		{
+			ID:         "task-1",
+			WorkflowID: wfID,
+			Type:       models.TaskTypeCalculate,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"a":"$.input.x","b":0,"op":"/"}`),
+		},
+	}
+	err = store.CreateWorkflow(ctx, wf, tasks)
+	require.NoError(t, err)
+
+	// 4. Submit
+	err = eng.Submit(ctx, wfID)
+	require.NoError(t, err)
+
+	// 5. Poll
+	var finalWF *models.Workflow
+	var finalTasks []models.Task
+	require.Eventually(t, func() bool {
+		var getErr error
+		finalWF, finalTasks, getErr = store.GetWorkflow(context.Background(), wfID)
+		if getErr != nil {
+			return false
+		}
+		return finalWF.Status == models.StatusFailed
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// 6. Verify assertions
+	assert.Equal(t, models.StatusFailed, finalWF.Status)
+	require.Len(t, finalTasks, 1)
+	assert.Equal(t, models.StatusFailed, finalTasks[0].Status)
+	assert.Contains(t, finalTasks[0].Error, "division by zero")
+}
+
+func TestEngine_Recovery(t *testing.T) {
+	t.Parallel()
+
+	// 1. Setup store
+	store, err := storage.NewSQLiteStorage(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// 2. Seed a Pending workflow and a Running workflow
+	wf1ID := "wf-pending-recovery"
+	wf1 := &models.Workflow{
+		ID:        wf1ID,
+		Status:    models.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	tasks1 := []models.Task{
+		{
+			ID:         "task-w1-1",
+			WorkflowID: wf1ID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"template":"wf1 task"}`),
+		},
+	}
+	err = store.CreateWorkflow(context.Background(), wf1, tasks1)
+	require.NoError(t, err)
+
+	wf2ID := "wf-running-recovery"
+	wf2 := &models.Workflow{
+		ID:        wf2ID,
+		Status:    models.StatusRunning,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	tasks2 := []models.Task{
+		{
+			ID:         "task-w2-1",
+			WorkflowID: wf2ID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusCompleted,
+			Position:   0,
+			Config:     json.RawMessage(`{"template":"skipped task"}`),
+			Output:     "already-done",
+		},
+		{
+			ID:         "task-w2-2",
+			WorkflowID: wf2ID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   1,
+			Config:     json.RawMessage(`{"template":"run me"}`),
+		},
+	}
+	err = store.CreateWorkflow(context.Background(), wf2, tasks2)
+	require.NoError(t, err)
+
+	// 3. Setup engine
+	eng := NewEngine(store, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eng.Start(ctx)
+	t.Cleanup(func() { eng.Stop() })
+
+	// 4. Run recovery
+	err = eng.RecoverOutstandingWork(ctx)
+	require.NoError(t, err)
+
+	// 5. Poll database for completion of both workflows
+	require.Eventually(t, func() bool {
+		w1, _, err1 := store.GetWorkflow(context.Background(), wf1ID)
+		w2, _, err2 := store.GetWorkflow(context.Background(), wf2ID)
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		return w1.Status == models.StatusCompleted && w2.Status == models.StatusCompleted
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// 6. Verify that tasks were handled correctly
+	_, tasks1Final, err := store.GetWorkflow(context.Background(), wf1ID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusCompleted, tasks1Final[0].Status)
+	assert.Equal(t, "wf1 task", tasks1Final[0].Output)
+
+	_, tasks2Final, err := store.GetWorkflow(context.Background(), wf2ID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusCompleted, tasks2Final[0].Status)
+	assert.Equal(t, "already-done", tasks2Final[0].Output) // skipped
+	assert.Equal(t, models.StatusCompleted, tasks2Final[1].Status)
+	assert.Equal(t, "run me", tasks2Final[1].Output) // executed
+}
+
+func TestEngine_GracefulShutdown_CancelDelay(t *testing.T) {
+	t.Parallel()
+
+	// 1. Setup store
+	store, err := storage.NewSQLiteStorage(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// 2. Setup engine with 1 worker and set a demo delay directly (parallel-safe)
+	eng := NewEngine(store, 1)
+	const delay = 500 * time.Millisecond
+	eng.demoDelay = delay
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eng.Start(ctx)
+
+	// 3. Seed workflow
+	wfID := "wf-shutdown-test"
+	wf := &models.Workflow{
+		ID:        wfID,
+		Status:    models.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	tasks := []models.Task{
+		{
+			ID:         "task-1",
+			WorkflowID: wfID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"template":"will be interrupted"}`),
+		},
+	}
+	err = store.CreateWorkflow(context.Background(), wf, tasks)
+	require.NoError(t, err)
+
+	// 4. Submit workflow
+	err = eng.Submit(context.Background(), wfID)
+	require.NoError(t, err)
+
+	// 5. Wait a tiny bit to make sure worker picked it up and is in time.After
+	time.Sleep(50 * time.Millisecond)
+
+	// 6. Stop the engine (which triggers graceful stop logic and cancels the worker context)
+	// Measure the duration to prove we didn't block for the full 500ms delay.
+	start := time.Now()
+	cancel()   // Cancel the signal context passed to Start
+	eng.Stop() // Drain workers
+	duration := time.Since(start)
+
+	// Shutdown should interrupt early and take much less time than the 500ms delay.
+	assert.Less(t, duration, delay)
+
+	// The workflow execution should have aborted and not updated to Completed
+	finalWF, finalTasks, err := store.GetWorkflow(context.Background(), wfID)
+	require.NoError(t, err)
+	assert.NotEqual(t, models.StatusCompleted, finalWF.Status)
+	assert.NotEqual(t, models.StatusCompleted, finalTasks[0].Status)
 }
