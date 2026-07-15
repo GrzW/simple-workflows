@@ -26,7 +26,7 @@ The engine controls resource consumption using a configurable, bounded worker po
 
 ### Crash Recovery & Fault Tolerance
 * **Idempotency (No Recomputation):** Completed tasks are never re-run. During a workflow execution, the engine evaluates the status of each task; if it is already marked `Completed` in the database, it is skipped, and its cached output is used.
-* **At-Least-Once Recovery for In-Flight Tasks:** If the engine crashes while a task is running, the workflow status remains `Running`. On startup, the system scans the database for any incomplete (`Pending` or `Running`) workflows and re-submits them to the worker queue. The in-flight task will safely restart from the beginning.
+* **At-Least-Once Recovery for In-Flight Tasks:** If the engine crashes while a task is running, the workflow status remains `Running`. On startup, the system scans the database for any incomplete (`Pending` or `Running`) workflows created **before the current application startup time** and re-submits them to the worker queue. Restricting recovery to pre-startup workflows avoids recovery races and duplication of newly submitted workflows. The in-flight task will safely restart from the beginning.
 * **Graceful Shutdown:** The engine listens for `SIGTERM` signals. When stopping, it stops accepting new HTTP requests and drains active workers, giving them up to `30 seconds` to finish executing their current tasks.
 
 ---
@@ -152,21 +152,34 @@ You can manage, test, and run the project easily using the provided Makefile.
 ### Quick Demo (Recommended!)
 To see the workflow engine in action immediately with live, colorized status updates in your terminal:
 
-1. In your first terminal window, spin up the engine:
+1. In your first terminal window, spin up the engine in slow-motion mode (runs with a 1-second task execution delay so you can easily observe the worker concurrency limit):
 ```bash
-   make docker-up
+make demo-up
 ```
-In your second terminal window, run the interactive demo script:
 
+2. In your second terminal window, run the interactive demo script:
 ```bash
 make demo
 ```
 The script will automatically submit multiple test workflows (successful runs and graceful failure scenarios) and poll their real-time execution status.
 
 ## Local Execution (Requires Go 1.25)
-**Run tests & coverage:**
+**Run tests:**
 ```bash
+# Run the test suite
+make test
+
+# Run tests with the Go race detector (requires local C compiler / CGO_ENABLED=1)
 make test-race
+
+# Run tests with the race detector inside a Docker container (no local GCC/CGO needed)
+make test-race-docker
+
+# Run tests with coverage profiling
+make test-cover
+
+# Generate and open HTML coverage report
+make cover-html
 ```
 
 **Start the engine locally (creates a SQLite database in the `./data` directory):**
@@ -185,4 +198,6 @@ The SQLite database is securely persisted within a named Docker volume.
 
 To inspect runtime logs, use `make docker-logs`.
 
-To tear down the container safely, use `make docker-down`.
+To tear down the container safely (preserving the database volume), use `make docker-down`.
+
+To tear down the container and delete the database volume, use `make docker-down-volumes`.

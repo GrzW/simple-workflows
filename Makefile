@@ -21,7 +21,7 @@ else
     DEMO_UP_CMD := DEMO_TASK_DELAY=1s docker compose -p $(COMPOSE_PROJECT) up --build -d
 endif
 
-.PHONY: all build run demo demo-up test test-race test-cover cover-html \
+.PHONY: all build run demo demo-up test test-race test-race-docker test-cover cover-html \
         fmt vet check tidy \
         docker-build docker-up docker-down docker-logs docker-ps \
         clean help
@@ -56,6 +56,11 @@ test:
 test-race:
 	@echo "==> Running tests with race detector…"
 	$(GO) test $(TEST_FLAGS) -race ./...
+
+## test-race-docker: Run tests with race detector inside a Go Docker container (no local GCC/CGO needed)
+test-race-docker:
+	@echo "==> Running tests with race detector inside Docker container…"
+	docker run --rm -v "$(CURDIR):/app" -w /app golang:1.25 go test $(TEST_FLAGS) -race ./...
 
 ## test-cover: Run tests with coverage profiling
 test-cover:
