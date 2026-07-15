@@ -1,0 +1,26 @@
+# Development artifacts
+*.db
+*.db-shm
+*.db-wal
+
+# Version control
+.git
+.gitignore
+
+# Editor / IDE directories
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# CI / test output
+coverage.out
+*.test
+
+# Gemini / AI tooling
+.agents
+.gemini

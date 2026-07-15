@@ -1,0 +1,26 @@
+services:
+  workflow-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: final
+    image: workflow-engine:latest
+    container_name: workflow-engine
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+    environment:
+      PORT: "8080"
+      DB_PATH: "/data/workflows.db"
+      CONCURRENCY: "4"
+      DEMO_TASK_DELAY:
+
+    volumes:
+      - workflow_data:/data
+
+    stop_signal: SIGTERM
+    stop_grace_period: 35s
+
+volumes:
+  workflow_data:
