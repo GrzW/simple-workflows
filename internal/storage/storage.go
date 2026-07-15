@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"workflow-engine/internal/models"
 )
@@ -23,8 +24,8 @@ type Store interface {
 	// ListWorkflows returns workflows ordered by creation time (oldest first) with support for pagination (limit, offset).
 	ListWorkflows(ctx context.Context, limit, offset int) ([]models.Workflow, error)
 
-	// ListRecoverableWorkflows returns recoverable workflows (Pending or Running) ordered by ID ascending, starting after the given afterID, up to the given batch size.
-	ListRecoverableWorkflows(ctx context.Context, afterID string, batchSize int) ([]models.Workflow, error)
+	// ListRecoverableWorkflows returns recoverable workflows (Pending or Running) ordered by ID ascending, starting after the given afterID, up to the given batch size, but only including those created before beforeTime.
+	ListRecoverableWorkflows(ctx context.Context, afterID string, beforeTime time.Time, batchSize int) ([]models.Workflow, error)
 
 	// UpdateTask writes the Status, Output, and Error fields of the given
 	// task back to the database. All other fields are left untouched.

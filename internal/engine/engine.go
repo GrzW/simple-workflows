@@ -33,6 +33,7 @@ type Engine struct {
 	cancel      context.CancelFunc // cancels ctx as a last resort after stop timeout
 	shutdownCtx context.Context    // parent context used only for shutdown detection
 	logger      *slog.Logger
+	startTime   time.Time
 }
 
 func NewEngine(store storage.Store, concurrency int) *Engine {
@@ -53,6 +54,7 @@ func NewEngine(store storage.Store, concurrency int) *Engine {
 		demoDelay:   demoDelay,
 		jobs:        make(chan string, defaultJobsBufferSize),
 		logger:      slog.Default().With("component", "engine"),
+		startTime:   time.Now().UTC(),
 	}
 }
 
@@ -122,7 +124,7 @@ func (e *Engine) RecoverOutstandingWork(ctx context.Context) error {
 			return fmt.Errorf("engine: recover outstanding work: %w", err)
 		}
 
-		workflows, err := e.store.ListRecoverableWorkflows(ctx, lastID, batchSize)
+		workflows, err := e.store.ListRecoverableWorkflows(ctx, lastID, e.startTime, batchSize)
 		if err != nil {
 			return fmt.Errorf("engine: recover outstanding work: %w", err)
 		}

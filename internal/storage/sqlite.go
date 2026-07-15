@@ -266,16 +266,16 @@ func (s *SQLiteStorage) ListWorkflows(ctx context.Context, limit, offset int) ([
 }
 
 // ListRecoverableWorkflows returns recoverable workflows (Pending or Running) ordered by ID ascending, starting after
-// the given afterID, up to the given batch size.
-func (s *SQLiteStorage) ListRecoverableWorkflows(ctx context.Context, afterID string, batchSize int) ([]models.Workflow, error) {
+// the given afterID, up to the given batch size, but only including those created before beforeTime.
+func (s *SQLiteStorage) ListRecoverableWorkflows(ctx context.Context, afterID string, beforeTime time.Time, batchSize int) ([]models.Workflow, error) {
 	const query = `
 		SELECT id, status, input, created_at, updated_at
 		FROM workflows
-		WHERE (status = ? OR status = ?) AND id > ?
+		WHERE (status = ? OR status = ?) AND id > ? AND created_at < ?
 		ORDER BY id ASC
 		LIMIT ?`
 
-	rows, err := s.db.QueryContext(ctx, query, string(models.StatusPending), string(models.StatusRunning), afterID, batchSize)
+	rows, err := s.db.QueryContext(ctx, query, string(models.StatusPending), string(models.StatusRunning), afterID, timeToString(beforeTime), batchSize)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list recoverable workflows: %w", err)
 	}

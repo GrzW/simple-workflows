@@ -508,12 +508,13 @@ func TestEngine_Recovery(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	// 2. Seed a Pending workflow and a Running workflow
+	now := time.Now().UTC()
 	wf1ID := "wf-pending-recovery"
 	wf1 := &models.Workflow{
 		ID:        wf1ID,
 		Status:    models.StatusPending,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: now.Add(-10 * time.Second),
+		UpdatedAt: now,
 	}
 	tasks1 := []models.Task{
 		{
@@ -532,8 +533,8 @@ func TestEngine_Recovery(t *testing.T) {
 	wf2 := &models.Workflow{
 		ID:        wf2ID,
 		Status:    models.StatusRunning,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: now.Add(-5 * time.Second),
+		UpdatedAt: now,
 	}
 	tasks2 := []models.Task{
 		{
@@ -654,4 +655,82 @@ func TestEngine_GracefulShutdown_CancelDelay(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, models.StatusCompleted, finalWF.Status)
 	assert.NotEqual(t, models.StatusCompleted, finalTasks[0].Status)
+}
+
+func TestEngine_Recovery_BeforeTimeGuard(t *testing.T) {
+	t.Parallel()
+
+	// 1. Setup store
+	store, err := storage.NewSQLiteStorage(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// 2. Setup engine
+	eng := NewEngine(store, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eng.Start(ctx)
+	t.Cleanup(func() { eng.Stop() })
+
+	// 3. Seed workflow BEFORE engine start time
+	wfBeforeID := "wf-before-recovery"
+	wfBefore := &models.Workflow{
+		ID:        wfBeforeID,
+		Status:    models.StatusPending,
+		CreatedAt: eng.startTime.Add(-5 * time.Second),
+		UpdatedAt: eng.startTime.Add(-5 * time.Second),
+	}
+	tasksBefore := []models.Task{
+		{
+			ID:         "task-before-1",
+			WorkflowID: wfBeforeID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"template":"run me before"}`),
+		},
+	}
+	err = store.CreateWorkflow(context.Background(), wfBefore, tasksBefore)
+	require.NoError(t, err)
+
+	// 4. Seed workflow AFTER engine start time
+	wfAfterID := "wf-after-recovery"
+	wfAfter := &models.Workflow{
+		ID:        wfAfterID,
+		Status:    models.StatusPending,
+		CreatedAt: eng.startTime.Add(5 * time.Second),
+		UpdatedAt: eng.startTime.Add(5 * time.Second),
+	}
+	tasksAfter := []models.Task{
+		{
+			ID:         "task-after-1",
+			WorkflowID: wfAfterID,
+			Type:       models.TaskTypePrint,
+			Status:     models.StatusPending,
+			Position:   0,
+			Config:     json.RawMessage(`{"template":"do not run me"}`),
+		},
+	}
+	err = store.CreateWorkflow(context.Background(), wfAfter, tasksAfter)
+	require.NoError(t, err)
+
+	// 5. Run recovery
+	err = eng.RecoverOutstandingWork(ctx)
+	require.NoError(t, err)
+
+	// 6. Wait for wfBefore to complete
+	require.Eventually(t, func() bool {
+		w, _, err := store.GetWorkflow(context.Background(), wfBeforeID)
+		if err != nil {
+			return false
+		}
+		return w.Status == models.StatusCompleted
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// 7. Verify wfAfter remains Pending
+	time.Sleep(100 * time.Millisecond)
+	wAfter, _, err := store.GetWorkflow(context.Background(), wfAfterID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusPending, wAfter.Status)
 }

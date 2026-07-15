@@ -331,7 +331,7 @@ func TestListRecoverableWorkflows(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	recoverable, err := s.ListRecoverableWorkflows(ctx, "", 10)
+	recoverable, err := s.ListRecoverableWorkflows(ctx, "", now.Add(time.Minute), 10)
 	require.NoError(t, err)
 	require.Len(t, recoverable, 3)
 
@@ -346,15 +346,51 @@ func TestListRecoverableWorkflows(t *testing.T) {
 	assert.Equal(t, models.StatusRunning, recoverable[2].Status)
 
 	// Test batch size / limit
-	firstBatch, err := s.ListRecoverableWorkflows(ctx, "", 2)
+	firstBatch, err := s.ListRecoverableWorkflows(ctx, "", now.Add(time.Minute), 2)
 	require.NoError(t, err)
 	require.Len(t, firstBatch, 2)
 	assert.Equal(t, "wf-pending-1", firstBatch[0].ID)
 	assert.Equal(t, "wf-pending-2", firstBatch[1].ID)
 
 	// Test keyset pagination with afterID
-	secondBatch, err := s.ListRecoverableWorkflows(ctx, "wf-pending-2", 2)
+	secondBatch, err := s.ListRecoverableWorkflows(ctx, "wf-pending-2", now.Add(time.Minute), 2)
 	require.NoError(t, err)
 	require.Len(t, secondBatch, 1)
 	assert.Equal(t, "wf-running", secondBatch[0].ID)
+}
+
+func TestListRecoverableWorkflowsBeforeTimeGuard(t *testing.T) {
+	t.Parallel()
+	s := newMemoryStore(t)
+	ctx := context.Background()
+
+	baseTime := time.Now().UTC()
+
+	// 1. Seed a workflow created before baseTime
+	wfBefore := &models.Workflow{
+		ID:        "wf-before",
+		Status:    models.StatusPending,
+		CreatedAt: baseTime.Add(-10 * time.Second),
+		UpdatedAt: baseTime,
+	}
+	err := s.CreateWorkflow(ctx, wfBefore, nil)
+	require.NoError(t, err)
+
+	// 2. Seed a workflow created after baseTime
+	wfAfter := &models.Workflow{
+		ID:        "wf-after",
+		Status:    models.StatusPending,
+		CreatedAt: baseTime.Add(10 * time.Second),
+		UpdatedAt: baseTime,
+	}
+	err = s.CreateWorkflow(ctx, wfAfter, nil)
+	require.NoError(t, err)
+
+	// 3. Query using baseTime as boundary
+	recoverable, err := s.ListRecoverableWorkflows(ctx, "", baseTime, 10)
+	require.NoError(t, err)
+
+	// 4. Assert only wfBefore is returned
+	require.Len(t, recoverable, 1)
+	assert.Equal(t, "wf-before", recoverable[0].ID)
 }
